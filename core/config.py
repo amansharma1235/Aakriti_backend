@@ -12,7 +12,10 @@ class Settings:
     # MySQL Database Connection (Supports standard vars, Railway/Aiven vars, or full DATABASE_URL)
     @property
     def _db_url_env(self) -> str:
-        return os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL") or ""
+        url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL") or ""
+        if not url and (os.getenv("RENDER") or os.getenv("PORT")):
+            return "mysql+pymysql://ZqAckF2JYGgphqR.root:lSTGSvIfa8gqj29s@gateway01.ap-southeast-1.prod.aws.tidbcloud.com:4000/aakriti_ultrasound"
+        return url
 
     @property
     def MYSQL_HOST(self) -> str:
