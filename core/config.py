@@ -10,7 +10,9 @@ class Settings:
     VERSION: str = "2.0.0"
     
     # MySQL Database Connection (Supports standard vars, Railway/Aiven vars, or full DATABASE_URL)
-    _db_url_env: str = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL") or ""
+    @property
+    def _db_url_env(self) -> str:
+        return os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL") or ""
 
     @property
     def MYSQL_HOST(self) -> str:
