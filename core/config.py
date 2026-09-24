@@ -9,15 +9,71 @@ class Settings:
     PROJECT_NAME: str = "Aakriti Ultrasound & Diagnostic API"
     VERSION: str = "2.0.0"
     
-    # MySQL Database Connection
-    MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
-    MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", 3306))
-    MYSQL_USER: str = os.getenv("MYSQL_USER", "root")
-    MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "aman7800839003@")
-    MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "aakriti_ultrasound")
-    
+    # MySQL Database Connection (Supports standard vars, Railway/Aiven vars, or full DATABASE_URL)
+    _db_url_env: str = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL") or ""
+
+    @property
+    def MYSQL_HOST(self) -> str:
+        if self._db_url_env:
+            try:
+                parsed = urllib.parse.urlparse(self._db_url_env)
+                if parsed.hostname:
+                    return parsed.hostname
+            except Exception:
+                pass
+        return os.getenv("MYSQL_HOST") or os.getenv("MYSQLHOST") or "localhost"
+
+    @property
+    def MYSQL_PORT(self) -> int:
+        if self._db_url_env:
+            try:
+                parsed = urllib.parse.urlparse(self._db_url_env)
+                if parsed.port:
+                    return parsed.port
+            except Exception:
+                pass
+        return int(os.getenv("MYSQL_PORT") or os.getenv("MYSQLPORT") or 3306)
+
+    @property
+    def MYSQL_USER(self) -> str:
+        if self._db_url_env:
+            try:
+                parsed = urllib.parse.urlparse(self._db_url_env)
+                if parsed.username:
+                    return urllib.parse.unquote(parsed.username)
+            except Exception:
+                pass
+        return os.getenv("MYSQL_USER") or os.getenv("MYSQLUSER") or "root"
+
+    @property
+    def MYSQL_PASSWORD(self) -> str:
+        if self._db_url_env:
+            try:
+                parsed = urllib.parse.urlparse(self._db_url_env)
+                if parsed.password:
+                    return urllib.parse.unquote(parsed.password)
+            except Exception:
+                pass
+        return os.getenv("MYSQL_PASSWORD") or os.getenv("MYSQLPASSWORD") or "aman7800839003@"
+
+    @property
+    def MYSQL_DATABASE(self) -> str:
+        if self._db_url_env:
+            try:
+                parsed = urllib.parse.urlparse(self._db_url_env)
+                if parsed.path and len(parsed.path) > 1:
+                    return parsed.path.lstrip("/").split("?")[0]
+            except Exception:
+                pass
+        return os.getenv("MYSQL_DATABASE") or os.getenv("MYSQLDATABASE") or "aakriti_ultrasound"
+
     @property
     def DATABASE_URL(self) -> str:
+        if self._db_url_env:
+            url = self._db_url_env
+            if url.startswith("mysql://"):
+                url = url.replace("mysql://", "mysql+pymysql://", 1)
+            return url
         # Properly URL-encode username and password to handle special chars like @, :, /
         encoded_user = urllib.parse.quote_plus(self.MYSQL_USER)
         encoded_password = urllib.parse.quote_plus(self.MYSQL_PASSWORD)

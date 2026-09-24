@@ -822,7 +822,7 @@ async def legacy_add_appointment(
 
 @app.put("/appointments/{appointment_id}")
 async def update_appointment(
-    appointment_id: int,
+    appointment_id: str,
     status: Optional[str] = None,
     service_name: Optional[str] = None,
     appointment_date: Optional[str] = None,
@@ -831,7 +831,7 @@ async def update_appointment(
     note: Optional[str] = None,
 ):
     connection = get_db_connection()
-    cursor = connection.cursor()
+    cursor = connection.cursor(dictionary=True)
     updates = []
     values = []
 
@@ -855,9 +855,24 @@ async def update_appointment(
         values.append(note)
 
     if updates:
-        values.append(appointment_id)
-        cursor.execute(f"UPDATE appointments SET {', '.join(updates)} WHERE id = %s", tuple(values))
+        if appointment_id.isdigit():
+            values.extend([int(appointment_id), appointment_id])
+            cursor.execute(f"UPDATE appointments SET {', '.join(updates)} WHERE id = %s OR appointment_id = %s", tuple(values))
+        else:
+            values.append(appointment_id)
+            cursor.execute(f"UPDATE appointments SET {', '.join(updates)} WHERE appointment_id = %s", tuple(values))
         connection.commit()
+
+    apt_row = None
+    if status:
+        try:
+            if appointment_id.isdigit():
+                cursor.execute("SELECT patient_id, patient_name, service_name, appointment_date FROM appointments WHERE id = %s OR appointment_id = %s", (int(appointment_id), appointment_id))
+            else:
+                cursor.execute("SELECT patient_id, patient_name, service_name, appointment_date FROM appointments WHERE appointment_id = %s", (appointment_id,))
+            apt_row = cursor.fetchone()
+        except Exception as e:
+            logger.warning(f"Error fetching appointment: {e}")
 
     cursor.close()
     connection.close()
@@ -873,31 +888,25 @@ async def update_appointment(
     await ws_manager.broadcast("APPOINTMENT_UPDATED", event_data)
 
     # Dispatch notification for patient
-    if status:
+    if status and apt_row:
         try:
-            # Query appointment info for patient_id and patient_name
-            cursor = connection.cursor(dictionary=True)
-            cursor.execute("SELECT patient_id, patient_name, service_name, appointment_date FROM appointments WHERE id = %s", (appointment_id,))
-            apt_row = cursor.fetchone()
-            cursor.close()
-            if apt_row:
-                p_id = apt_row.get("patient_id")
-                p_name = apt_row.get("patient_name") or "Patient"
-                s_name = apt_row.get("service_name") or "Ultrasound Procedure"
-                a_date = apt_row.get("appointment_date") or ""
-                
-                title = f"Appointment {status}! ✅" if status == "Confirmed" else f"Appointment {status}"
-                msg = f"Your appointment for {s_name} on {a_date} has been updated to {status}."
-                await dispatch_notification(
-                    db=None,
-                    title=title,
-                    message=msg,
-                    notification_type="Appointment",
-                    patient_id=p_id,
-                    patient_name=p_name,
-                    event_type="APPOINTMENT_UPDATED",
-                    extra_data={"appointment": event_data}
-                )
+            p_id = apt_row.get("patient_id")
+            p_name = apt_row.get("patient_name") or "Patient"
+            s_name = apt_row.get("service_name") or "Ultrasound Procedure"
+            a_date = apt_row.get("appointment_date") or ""
+            
+            title = f"Appointment {status}! ✅" if status == "Confirmed" else f"Appointment {status}"
+            msg = f"Your appointment for {s_name} on {a_date} has been updated to {status}."
+            await dispatch_notification(
+                db=None,
+                title=title,
+                message=msg,
+                notification_type="Appointment",
+                patient_id=p_id,
+                patient_name=p_name,
+                event_type="APPOINTMENT_UPDATED",
+                extra_data={"appointment": event_data}
+            )
         except Exception as e:
             logger.warning(f"Notification error in update_appointment: {e}")
 
@@ -905,10 +914,13 @@ async def update_appointment(
 
 
 @app.delete("/appointments/{appointment_id}")
-async def delete_appointment(appointment_id: int):
+async def delete_appointment(appointment_id: str):
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("DELETE FROM appointments WHERE id = %s", (appointment_id,))
+    if appointment_id.isdigit():
+        cursor.execute("DELETE FROM appointments WHERE id = %s OR appointment_id = %s", (int(appointment_id), appointment_id))
+    else:
+        cursor.execute("DELETE FROM appointments WHERE appointment_id = %s", (appointment_id,))
     connection.commit()
     cursor.close()
     connection.close()
