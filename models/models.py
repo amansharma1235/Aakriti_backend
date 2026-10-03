@@ -87,7 +87,9 @@ class Report(Base):
     file_name = Column(String(255), nullable=True)
     file_path = Column(String(255), nullable=True)
     status = Column(String(20), default="Ready")
+    description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 class Payment(Base):
     __tablename__ = "payments"

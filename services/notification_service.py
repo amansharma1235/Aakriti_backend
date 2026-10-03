@@ -24,7 +24,7 @@ async def dispatch_notification(
     3. Send Firebase push notification to registered admin device tokens
     Errors in WebSocket or Firebase are caught and logged, never aborting the DB record.
     """
-    notif_id = f"NTF{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    notif_id = f"NTF{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     
     db_notif = Notification(
         notification_id=notif_id,
@@ -49,9 +49,10 @@ async def dispatch_notification(
             "type": notification_type,
             "patient_id": patient_id,
             "patient_name": patient_name,
-            "created_at": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             **(extra_data or {}),
         }
+
         await ws_manager.broadcast(event_type=event_type, data=ws_payload)
         logger.info(f"[Notification] Dispatched WS event '{event_type}': {title}")
     except Exception as e:
@@ -59,14 +60,32 @@ async def dispatch_notification(
 
     # 3. Firebase Push Notification
     try:
-        tokens_records = db.query(FcmToken).filter(FcmToken.user_type == "admin").all()
-        token_list = [t.token for t in tokens_records if t.token]
+        # Fetch admin tokens and patient-specific tokens
+        token_query = db.query(FcmToken)
+        if patient_id:
+            token_query = token_query.filter(
+                (FcmToken.user_type == "admin") | (FcmToken.user_id == patient_id) | (FcmToken.user_type == "patient")
+            )
+        else:
+            token_query = token_query.filter(FcmToken.user_type == "admin")
+            
+        tokens_records = token_query.all()
+        token_list = list(set([t.token for t in tokens_records if t.token]))
         if token_list:
+            fcm_data = {
+                "event": event_type,
+                "notification_id": notif_id,
+                "notification_type": notification_type.lower(),
+                "patient_id": patient_id or "",
+            }
+            if extra_data:
+                for k, v in extra_data.items():
+                    fcm_data[str(k)] = str(v)
             send_push_notification(
                 tokens=token_list,
                 title=title,
                 body=message,
-                data={"event": event_type, "notification_id": notif_id},
+                data=fcm_data,
             )
     except Exception as e:
         logger.error(f"[Notification] Firebase push failed (safe ignore): {e}")
