@@ -1,10 +1,23 @@
 from typing import Optional, Any, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 class ApiResponse(BaseModel):
     success: bool
     message: str
     data: Optional[Any] = None
+
+class AdminLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AdminChangePasswordRequest(BaseModel):
+    email: str
+    new_password: str
+
+class AdminUpdateProfileRequest(BaseModel):
+    name: str
+    email: str
+    mobile: Optional[str] = None
 
 class AppointmentCreateSchema(BaseModel):
     patient_name: str
@@ -30,5 +43,5 @@ class AppointmentRescheduleSchema(BaseModel):
 class FcmTokenRegisterSchema(BaseModel):
     token: str
     device_type: Optional[str] = "android"
-    user_type: Optional[str] = "admin"
+    user_type: Optional[str] = "patient"
     user_id: Optional[str] = None

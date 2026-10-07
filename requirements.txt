@@ -10,3 +10,4 @@ websockets>=12.0
 pyjwt>=2.8.0
 requests>=2.31.0
 firebase-admin>=6.5.0
+python-multipart>=0.0.9

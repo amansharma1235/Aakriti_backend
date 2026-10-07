@@ -39,10 +39,23 @@ from models.models import (
     Service,
 )
 from schemas.schemas import (
+    AdminChangePasswordRequest,
+    AdminLoginRequest,
+    AdminUpdateProfileRequest,
+    ApiResponse,
     AppointmentCreateSchema,
     AppointmentRescheduleSchema,
     AppointmentStatusUpdateSchema,
     FcmTokenRegisterSchema,
+)
+from core.security import (
+    create_access_token,
+    get_current_user,
+    get_optional_current_user,
+    hash_password,
+    require_admin,
+    verify_password,
+    verify_patient_access,
 )
 from services.appointment_service import (
     create_new_appointment,
@@ -338,7 +351,8 @@ async def create_appointment_api(
 async def update_appointment_status_api(
     id: int,
     payload: AppointmentStatusUpdateSchema,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     apt = db.query(Appointment).filter(Appointment.id == id).first()
     if not apt:
@@ -609,7 +623,7 @@ def home():
 
 
 @app.get("/dashboard/stats")
-def dashboard_stats():
+def dashboard_stats(_admin: Dict[str, Any] = Depends(require_admin)):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
@@ -663,7 +677,7 @@ def dashboard_stats():
 
 # ---------------- PATIENTS ----------------
 @app.get("/patients")
-def get_patients():
+def get_patients(_admin: Dict[str, Any] = Depends(require_admin)):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT * FROM patients ORDER BY id DESC")
@@ -691,17 +705,26 @@ def add_patient(
         """
         INSERT INTO patients (patient_id, full_name, mobile, age, gender, blood_group, email, address, status)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            full_name=VALUES(full_name),
+            mobile=VALUES(mobile),
+            age=VALUES(age),
+            gender=VALUES(gender),
+            blood_group=VALUES(blood_group),
+            email=VALUES(email),
+            address=VALUES(address),
+            status=VALUES(status)
         """,
         (patient_id, full_name, mobile, age, gender, blood_group, email, address, status),
     )
     connection.commit()
     cursor.close()
     connection.close()
-    return {"success": True, "message": "Patient added successfully", "patient_id": patient_id}
+    return {"success": True, "message": "Patient profile synchronized successfully", "patient_id": patient_id}
 
 
 @app.delete("/patients/{patient_id}")
-def delete_patient(patient_id: str):
+def delete_patient(patient_id: str, _admin: Dict[str, Any] = Depends(require_admin)):
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("DELETE FROM patients WHERE patient_id = %s", (patient_id,))
@@ -713,7 +736,7 @@ def delete_patient(patient_id: str):
 
 # ---------------- APPOINTMENTS ----------------
 @app.get("/appointments")
-def get_appointments():
+def get_appointments(_admin: Dict[str, Any] = Depends(require_admin)):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT * FROM appointments ORDER BY id DESC")
@@ -724,7 +747,16 @@ def get_appointments():
 
 
 @app.get("/appointments/patient/{patient_id}")
-def get_patient_appointments(patient_id: str):
+def get_patient_appointments(
+    patient_id: str,
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user),
+):
+    # Enforce strict patient ownership check
+    if current_user and not verify_patient_access(patient_id, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only view your own appointments.",
+        )
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT * FROM appointments WHERE patient_id = %s ORDER BY id DESC", (patient_id,))
@@ -811,6 +843,7 @@ async def update_appointment(
     appointment_time: Optional[str] = None,
     doctor_name: Optional[str] = None,
     note: Optional[str] = None,
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
@@ -896,7 +929,10 @@ async def update_appointment(
 
 
 @app.delete("/appointments/{appointment_id}")
-async def delete_appointment(appointment_id: str):
+async def delete_appointment(
+    appointment_id: str,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
     connection = get_db_connection()
     cursor = connection.cursor()
     if appointment_id.isdigit():
@@ -931,6 +967,7 @@ def add_doctor(
     mobile: str,
     experience: str,
     status: str = "Active",
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     connection = get_db_connection()
     cursor = connection.cursor()
@@ -938,6 +975,12 @@ def add_doctor(
         """
         INSERT INTO doctors (doctor_id, doctor_name, specialization, mobile, experience, status)
         VALUES (%s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            doctor_name=VALUES(doctor_name),
+            specialization=VALUES(specialization),
+            mobile=VALUES(mobile),
+            experience=VALUES(experience),
+            status=VALUES(status)
         """,
         (doctor_id, doctor_name, specialization, mobile, experience, status),
     )
@@ -948,7 +991,10 @@ def add_doctor(
 
 
 @app.delete("/doctors/{doctor_id}")
-def delete_doctor(doctor_id: str):
+def delete_doctor(
+    doctor_id: str,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("DELETE FROM doctors WHERE doctor_id = %s", (doctor_id,))
@@ -980,6 +1026,7 @@ async def add_service(
     duration: Optional[str] = Query(None),
     description: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     # Support both JSON body and Query params
     payload = {}
@@ -1058,7 +1105,11 @@ async def add_service(
 
 
 @app.put("/services/{service_id}")
-async def update_service(service_id: str, request: Request):
+async def update_service(
+    service_id: str,
+    request: Request,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
     payload = {}
     try:
         payload = await request.json()
@@ -1112,7 +1163,10 @@ async def update_service(service_id: str, request: Request):
 
 
 @app.delete("/services/{service_id}")
-async def delete_service(service_id: str):
+async def delete_service(
+    service_id: str,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("DELETE FROM services WHERE service_id = %s", (service_id,))
@@ -1130,7 +1184,7 @@ async def delete_service(service_id: str):
 
 # ---------------- REPORTS ----------------
 @app.get("/reports")
-def get_reports():
+def get_reports(_admin: Dict[str, Any] = Depends(require_admin)):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT * FROM reports ORDER BY id DESC")
@@ -1141,14 +1195,26 @@ def get_reports():
 
 
 @app.get("/reports/my-reports")
-def get_my_reports(patient_id: Optional[str] = Query(None)):
+def get_my_reports(
+    patient_id: Optional[str] = Query(None),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user),
+):
     """
-    STRICT SECURITY: Returns ONLY reports belonging to the specified patient_id.
+    STRICT SECURITY: Returns ONLY reports belonging to the authenticated patient.
     """
-    if not patient_id or not patient_id.strip():
+    clean_pid = (patient_id or "").strip()
+    if not clean_pid and current_user:
+        clean_pid = str(current_user.get("patient_id") or "").strip()
+
+    if not clean_pid:
         return {"success": True, "count": 0, "reports": []}
 
-    clean_pid = patient_id.strip()
+    if current_user and not verify_patient_access(clean_pid, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only view your own diagnostic reports.",
+        )
+
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT * FROM reports WHERE LOWER(patient_id) = LOWER(%s) ORDER BY id DESC", (clean_pid,))
@@ -1170,7 +1236,8 @@ async def add_report(
     file_path: str = "",
     description: str = "",
     status: str = "Ready",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     connection = get_db_connection()
     cursor = connection.cursor()
@@ -1221,18 +1288,17 @@ async def upload_report_file(
     description: str = Form(""),
     status: str = Form("Ready"),
     file: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     saved_file_name = ""
     saved_file_path = ""
 
     if file:
-        # File type validation
         ext = os.path.splitext(file.filename)[1].lower()
         if ext not in [".pdf", ".jpg", ".jpeg", ".png"]:
             raise HTTPException(status_code=400, detail="Invalid file type. Supported formats: PDF, JPG, PNG.")
         
-        # Save file to uploads directory
         upload_dir = os.path.join(os.getcwd(), "uploads", "reports")
         os.makedirs(upload_dir, exist_ok=True)
         
@@ -1296,7 +1362,10 @@ def serve_report_file(safe_filename: str):
 
 
 @app.delete("/reports/{report_id}")
-def delete_report(report_id: str):
+def delete_report(
+    report_id: str,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("DELETE FROM reports WHERE report_id = %s", (report_id,))
@@ -1308,10 +1377,40 @@ def delete_report(report_id: str):
 
 # ---------------- PAYMENTS ----------------
 @app.get("/payments")
-def get_payments():
+def get_payments(_admin: Dict[str, Any] = Depends(require_admin)):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT * FROM payments ORDER BY id DESC")
+    payments = [serialize_row(row) for row in cursor.fetchall()]
+    cursor.close()
+    connection.close()
+    return {"success": True, "count": len(payments), "payments": payments}
+
+
+@app.get("/payments/my-payments")
+def get_my_payments(
+    patient_id: Optional[str] = Query(None),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user),
+):
+    """
+    STRICT SECURITY: Returns ONLY payments belonging to the authenticated patient.
+    """
+    target_pid = (patient_id or "").strip()
+    if not target_pid and current_user:
+        target_pid = str(current_user.get("patient_id") or "").strip()
+
+    if not target_pid:
+        return {"success": True, "count": 0, "payments": []}
+
+    if current_user and not verify_patient_access(target_pid, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only view your own payment records.",
+        )
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM payments WHERE LOWER(patient_id) = LOWER(%s) ORDER BY id DESC", (target_pid,))
     payments = [serialize_row(row) for row in cursor.fetchall()]
     cursor.close()
     connection.close()
@@ -1329,6 +1428,7 @@ async def add_payment(
     status: str = "Paid",
     transaction_id: str = "",
     notes: str = "",
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     connection = get_db_connection()
     cursor = connection.cursor()
@@ -1355,10 +1455,21 @@ async def add_payment(
 
 # ---------------- NOTIFICATIONS ----------------
 @app.get("/notifications")
-def get_notifications():
+def get_notifications(
+    patient_id: Optional[str] = Query(None),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user),
+):
+    if patient_id and current_user and not verify_patient_access(patient_id, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only view your own notifications.",
+        )
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM notifications ORDER BY id DESC")
+    if patient_id:
+        cursor.execute("SELECT * FROM notifications WHERE patient_id = %s ORDER BY id DESC", (patient_id,))
+    else:
+        cursor.execute("SELECT * FROM notifications ORDER BY id DESC")
     notifications = [serialize_row(row) for row in cursor.fetchall()]
     cursor.close()
     connection.close()
@@ -1391,7 +1502,10 @@ def add_notification(
 
 
 @app.delete("/notifications/{notification_id}")
-def delete_notification(notification_id: str):
+def delete_notification(
+    notification_id: str,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
     connection = get_db_connection()
     cursor = connection.cursor()
     cursor.execute("DELETE FROM notifications WHERE notification_id = %s", (notification_id,))
@@ -1401,40 +1515,88 @@ def delete_notification(notification_id: str):
     return {"success": True, "message": "Notification deleted successfully"}
 
 
-# ---------------- ADMIN AUTHENTICATION ----------------
+# ---------------- AUTHENTICATION & ROLE VERIFICATION ----------------
+@app.get("/api/auth/verify-role")
+@app.post("/api/auth/verify-role")
+async def verify_auth_role(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Endpoint called by Flutter after Firebase Authentication.
+    Verifies token, looks up role in MySQL, and returns verified identity & role.
+    Role is determined entirely on the server.
+    """
+    return {
+        "success": True,
+        "role": current_user.get("role", "patient"),
+        "is_admin": current_user.get("role") == "admin",
+        "user": current_user,
+    }
+
+
 @app.post("/admin/login")
-def admin_login(email: str, password: str):
+def admin_login(
+    payload: Optional[AdminLoginRequest] = None,
+    email: Optional[str] = None,
+    password: Optional[str] = None,
+):
+    req_email = (payload.email if payload else email or "").strip()
+    req_password = (payload.password if payload else password or "").strip()
+
+    if not req_email or not req_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email and password are required.",
+        )
+
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
     cursor.execute(
-        """
-        SELECT id, name, email, status
-        FROM admin_users
-        WHERE email = %s
-        AND (password = %s OR (password = '809056' AND %s IN ('809056', 'admin123')) OR (password = 'admin123' AND %s IN ('809056', 'admin123')))
-        AND status = 'Active'
-        """,
-        (email, password, password, password),
+        "SELECT id, name, email, password, status FROM admin_users WHERE LOWER(email) = LOWER(%s) AND status = 'Active'",
+        (req_email,),
     )
     user = cursor.fetchone()
     cursor.close()
     connection.close()
 
-    if user is None:
-        if email.lower() in ["admin@aakriti.com", "admin@aakritiultrasound.com"] and password in ["809056", "admin123"]:
-            return {
-                "success": True,
-                "message": "Login successful",
-                "user": {
-                    "id": 1,
-                    "name": "Aman Sharma",
-                    "email": email,
-                    "status": "Active",
-                },
-            }
-        return {"success": False, "message": "Invalid email or password"}
+    if not user or not verify_password(req_password, user["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
 
-    return {"success": True, "message": "Login successful", "user": user}
+    token = create_access_token({
+        "sub": str(user["id"]),
+        "uid": str(user["id"]),
+        "email": user["email"],
+        "name": user["name"],
+        "role": "admin",
+    })
+
+    return {
+        "success": True,
+        "message": "Login successful",
+        "token": token,
+        "access_token": token,
+        "role": "admin",
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "role": "admin",
+            "status": user["status"],
+        },
+        "data": {
+            "access_token": token,
+            "token": token,
+            "role": "admin",
+            "user": {
+                "id": user["id"],
+                "name": user["name"],
+                "email": user["email"],
+                "role": "admin",
+                "status": user["status"],
+            },
+        },
+    }
 
 
 @app.post("/admin/change-password")
