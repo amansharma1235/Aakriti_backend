@@ -1884,12 +1884,21 @@ def get_clinic_status():
     - Emergency helpline
     """
     try:
-        now = datetime.datetime.now()
-        # Clinic open: 10:00 AM to 04:00 PM
-        is_open = 10 <= now.hour < 16
+        # Indian Standard Time (UTC + 5:30)
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        ist_now = utc_now + datetime.timedelta(hours=5, minutes=30)
+
+        # Clinic open: 10:00 AM to 04:00 PM IST
+        is_open = (10 <= ist_now.hour < 16)
+        if is_open:
+            status_text = "OPEN NOW"
+        elif ist_now.hour < 10:
+            status_text = "CLOSED (Opens 10:00 AM)"
+        else:
+            status_text = "CLOSED (Opens Tomorrow 10:00 AM)"
 
         # Count today's appointments
-        today_str = now.strftime("%Y-%m-%d")
+        today_str = ist_now.strftime("%Y-%m-%d")
         total_today = 0
         completed_today = 0
 
@@ -1917,7 +1926,7 @@ def get_clinic_status():
             "success": True,
             "clinic_name": "Aakriti Ultrasound & Diagnostic Centre",
             "is_open": is_open,
-            "status_text": "OPEN NOW" if is_open else "CLOSED (Opens 10:00 AM)",
+            "status_text": status_text,
             "timing_text": "10:00 AM - 04:00 PM",
             "current_token": current_token,
             "total_tokens_today": max(total_today, current_token),
