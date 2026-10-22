@@ -191,7 +191,7 @@ def seed_initial_data():
             cursor.execute("DELETE FROM appointments WHERE appointment_id IN ('APT1001', 'APT1002', 'APT1003', 'APT1004', 'APT1005')")
             cursor.execute("DELETE FROM reports WHERE report_id IN ('RPT001', 'RPT002', 'RPT003', 'RPT004', 'RPT005')")
             cursor.execute("DELETE FROM notifications WHERE notification_id IN ('NTF001', 'NTF002', 'NTF003', 'NTF004', 'NTF005')")
-            cursor.execute("DELETE FROM payments WHERE payment_id IN ('PAY001', 'PAY002', 'PAY003', 'PAY004', 'PAY005')")
+            cursor.execute("DELETE FROM payments WHERE payment_id IN ('PAY001', 'PAY002', 'PAY003', 'PAY004', 'PAY005') OR payment_id LIKE 'PAY00%'")
             cursor.execute("DELETE FROM patients WHERE patient_id IN ('AKR001', 'AKR132', 'AKR133')")
             connection.commit()
         except Exception as clean_err:
@@ -208,9 +208,28 @@ def seed_initial_data():
             )
             connection.commit()
 
+        # 4. PERFORMANCE INDEXES
+        try:
+            indexes = [
+                ("appointments", "idx_apt_date", "appointment_date"),
+                ("appointments", "idx_apt_status", "status"),
+                ("appointments", "idx_apt_mobile", "mobile"),
+                ("patients", "idx_patient_mobile", "mobile"),
+                ("doctors", "idx_doctor_status", "status"),
+                ("services", "idx_service_status", "status"),
+            ]
+            for tbl, idx_name, col in indexes:
+                try:
+                    cursor.execute(f"CREATE INDEX `{idx_name}` ON `{tbl}` (`{col}`)")
+                    connection.commit()
+                except Exception:
+                    pass
+        except Exception as idx_err:
+            logger.warning(f"[Startup] Index creation note: {idx_err}")
+
         cursor.close()
         connection.close()
-        logger.info("[Startup] Database check and seeds completed successfully.")
+        logger.info("[Startup] Database check, indexes, and seeds completed successfully.")
     except Exception as e:
         logger.warning(f"[Startup] Seed warning (ignored): {e}")
 
@@ -505,18 +524,14 @@ def get_patient_summary(id: str, db: Session = Depends(get_db)):
 
     total_billed = sum([float(p.amount) for p in payments])
     total_paid = sum([float(p.amount) for p in payments if p.status == "Paid"])
-    if not payments and apts:
-        # Realistic fallback billing: 800 per appointment
-        total_billed = float(len(apts) * 800)
-        total_paid = total_billed
     balance_due = max(0.0, total_billed - total_paid)
 
     billing = {
         "total_billed": total_billed,
         "total_paid": total_paid,
         "balance_due": balance_due,
-        "payment_status": "Paid" if balance_due <= 0 else "Pending",
-        "last_payment_mode": "UPI / QR",
+        "payment_status": "Paid" if total_billed > 0 and balance_due <= 0 else ("Pending" if balance_due > 0 else "N/A"),
+        "last_payment_mode": payments[0].payment_method if payments else "N/A",
     }
 
     return {
@@ -768,11 +783,12 @@ def get_patient_appointments(
 
 @app.post("/appointments")
 async def legacy_add_appointment(
-    appointment_id: str,
-    patient_id: str,
-    patient_name: str,
-    service_name: str,
-    appointment_date: str,
+    request: Request,
+    appointment_id: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    patient_name: Optional[str] = None,
+    service_name: Optional[str] = None,
+    appointment_date: Optional[str] = None,
     mobile: Optional[str] = None,
     appointment_time: Optional[str] = None,
     doctor_name: Optional[str] = None,
@@ -782,18 +798,80 @@ async def legacy_add_appointment(
 ):
     """
     Enhanced legacy POST /appointments:
-    Saves to MySQL and also broadcasts real-time WebSocket event to all connected admin screens!
+    Accepts JSON body or query params.
+    Ensures patient profile exists before inserting to prevent Foreign Key constraints.
+    Saves to MySQL and broadcasts real-time WebSocket event.
     """
+    # Parse JSON body if provided
+    try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+            if isinstance(body, dict):
+                appointment_id = body.get("appointment_id") or appointment_id
+                patient_id = body.get("patient_id") or patient_id
+                patient_name = body.get("patient_name") or patient_name
+                service_name = body.get("service_name") or service_name
+                appointment_date = body.get("appointment_date") or appointment_date
+                mobile = body.get("mobile") or mobile
+                appointment_time = body.get("appointment_time") or appointment_time
+                doctor_name = body.get("doctor_name") or doctor_name
+                note = body.get("note") or note
+                status = body.get("status") or status
+    except Exception as parse_err:
+        logger.warning(f"Body parsing note: {parse_err}")
+
+    # Fallback defaults
+    patient_name = (patient_name or "Patient").strip()
+    service_name = (service_name or "Ultrasound Scan").strip()
+    appointment_date = (appointment_date or datetime.date.today().isoformat()).strip()
+    appointment_id = appointment_id or f"APT-{uuid.uuid4().hex[:8].upper()}"
+
     connection = get_db_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        INSERT INTO appointments (appointment_id, patient_id, patient_name, mobile, service_name, appointment_date, appointment_time, doctor_name, note, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-        (appointment_id, patient_id, patient_name, mobile, service_name, appointment_date, appointment_time, doctor_name, note, status),
-    )
-    connection.commit()
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        # Ensure patient exists in patients table
+        if not patient_id:
+            cursor.execute("SELECT patient_id FROM patients WHERE mobile = %s", (mobile or "",))
+            row = cursor.fetchone()
+            if row:
+                patient_id = row["patient_id"]
+            else:
+                cursor.execute("SELECT COUNT(*) AS cnt FROM patients")
+                cnt = cursor.fetchone()["cnt"]
+                patient_id = f"AKR{str(cnt + 140).zfill(3)}"
+                cursor.execute(
+                    "INSERT INTO patients (patient_id, full_name, mobile, status) VALUES (%s, %s, %s, 'Active')",
+                    (patient_id, patient_name, mobile or ""),
+                )
+                connection.commit()
+        else:
+            cursor.execute("SELECT patient_id FROM patients WHERE patient_id = %s", (patient_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO patients (patient_id, full_name, mobile, status) VALUES (%s, %s, %s, 'Active')",
+                    (patient_id, patient_name, mobile or ""),
+                )
+                connection.commit()
+
+        cursor.execute(
+            """
+            INSERT INTO appointments (appointment_id, patient_id, patient_name, mobile, service_name, appointment_date, appointment_time, doctor_name, note, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (appointment_id, patient_id, patient_name, mobile, service_name, appointment_date, appointment_time, doctor_name, note, status),
+        )
+        connection.commit()
+    except Exception as db_err:
+        logger.error(f"Error creating appointment: {db_err}")
+        cursor.close()
+        connection.close()
+        return {
+            "success": False,
+            "message": f"Could not create appointment: {str(db_err)}",
+            "appointment_id": appointment_id,
+        }
+
     cursor.close()
     connection.close()
 
@@ -929,9 +1007,10 @@ async def update_appointment(
 
 
 @app.delete("/appointments/{appointment_id}")
+@app.delete("/api/appointments/{appointment_id}")
 async def delete_appointment(
     appointment_id: str,
-    _admin: Dict[str, Any] = Depends(require_admin),
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_current_user),
 ):
     connection = get_db_connection()
     cursor = connection.cursor()
@@ -960,48 +1039,152 @@ def get_doctors():
 
 
 @app.post("/doctors")
-def add_doctor(
-    doctor_id: str,
-    doctor_name: str,
-    specialization: str,
-    mobile: str,
-    experience: str,
-    status: str = "Active",
+@app.post("/api/doctors")
+async def add_doctor(
+    request: Request,
+    doctor_id: Optional[str] = Query(None),
+    doctor_name: Optional[str] = Query(None),
+    specialization: Optional[str] = Query(None),
+    mobile: Optional[str] = Query(None),
+    experience: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
+    # Support both JSON body and Query params
+    payload = {}
+    try:
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            payload = await request.json()
+    except Exception:
+        pass
+
+    final_name = (payload.get("doctor_name") or payload.get("name") or doctor_name or "").strip()
+    if not final_name:
+        raise HTTPException(status_code=400, detail="Doctor name is required")
+
+    final_spec = (payload.get("specialization") or specialization or "Consultant Specialist").strip()
+    final_mobile = (payload.get("mobile") or payload.get("phone") or mobile or "").strip()
+    final_exp = (payload.get("experience") or experience or "5 Years").strip()
+    final_status = (payload.get("status") or status or "Active").strip()
+    final_id = (payload.get("doctor_id") or payload.get("id") or doctor_id or "").strip()
+
     connection = get_db_connection()
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        INSERT INTO doctors (doctor_id, doctor_name, specialization, mobile, experience, status)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            doctor_name=VALUES(doctor_name),
-            specialization=VALUES(specialization),
-            mobile=VALUES(mobile),
-            experience=VALUES(experience),
-            status=VALUES(status)
-        """,
-        (doctor_id, doctor_name, specialization, mobile, experience, status),
-    )
-    connection.commit()
-    cursor.close()
-    connection.close()
-    return {"success": True, "message": "Doctor added successfully"}
+    cursor = connection.cursor(dictionary=True)
+    try:
+        if not final_id:
+            cursor.execute("SELECT COUNT(*) AS cnt FROM doctors")
+            count = cursor.fetchone()["cnt"]
+            final_id = f"DOC{str(count + 1).zfill(3)}"
+
+        cursor.execute(
+            """
+            INSERT INTO doctors (doctor_id, doctor_name, specialization, mobile, experience, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                doctor_name=VALUES(doctor_name),
+                specialization=VALUES(specialization),
+                mobile=VALUES(mobile),
+                experience=VALUES(experience),
+                status=VALUES(status)
+            """,
+            (final_id, final_name, final_spec, final_mobile, final_exp, final_status),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    doc_data = {
+        "doctor_id": final_id,
+        "doctor_name": final_name,
+        "specialization": final_spec,
+        "mobile": final_mobile,
+        "experience": final_exp,
+        "status": final_status,
+    }
+
+    try:
+        await ws_manager.broadcast("DOCTOR_ADDED", doc_data)
+    except Exception:
+        pass
+
+    return {"success": True, "message": "Doctor saved successfully", "doctor": doc_data}
+
+
+@app.put("/doctors/{doctor_id}")
+@app.put("/api/doctors/{doctor_id}")
+async def update_doctor(
+    doctor_id: str,
+    request: Request,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    payload = {}
+    try:
+        payload = await request.json()
+    except Exception:
+        pass
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM doctors WHERE doctor_id = %s", (doctor_id,))
+        current = cursor.fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+
+        doc_name = (payload.get("doctor_name") or payload.get("name") or current["doctor_name"]).strip()
+        spec = (payload.get("specialization") or current["specialization"]).strip()
+        mob = (payload.get("mobile") or payload.get("phone") or current["mobile"]).strip()
+        exp = (payload.get("experience") or current["experience"]).strip()
+        stat = (payload.get("status") or current["status"]).strip()
+
+        cursor.execute(
+            """
+            UPDATE doctors
+            SET doctor_name=%s, specialization=%s, mobile=%s, experience=%s, status=%s
+            WHERE doctor_id=%s
+            """,
+            (doc_name, spec, mob, exp, stat, doctor_id),
+        )
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
+
+    doc_data = {
+        "doctor_id": doctor_id,
+        "doctor_name": doc_name,
+        "specialization": spec,
+        "mobile": mob,
+        "experience": exp,
+        "status": stat,
+    }
+
+    try:
+        await ws_manager.broadcast("DOCTOR_UPDATED", doc_data)
+    except Exception:
+        pass
+
+    return {"success": True, "message": "Doctor updated successfully", "doctor": doc_data}
 
 
 @app.delete("/doctors/{doctor_id}")
+@app.delete("/api/doctors/{doctor_id}")
 def delete_doctor(
     doctor_id: str,
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("DELETE FROM doctors WHERE doctor_id = %s", (doctor_id,))
-    connection.commit()
-    cursor.close()
-    connection.close()
+    try:
+        cursor.execute("DELETE FROM doctors WHERE doctor_id = %s", (doctor_id,))
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
     return {"success": True, "message": "Doctor deleted successfully"}
+
 
 
 # ---------------- SERVICES ----------------
@@ -1105,6 +1288,7 @@ async def add_service(
 
 
 @app.put("/services/{service_id}")
+@app.put("/api/services/{service_id}")
 async def update_service(
     service_id: str,
     request: Request,
@@ -1118,31 +1302,31 @@ async def update_service(
 
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM services WHERE service_id = %s", (service_id,))
-    current = cursor.fetchone()
-    if not current:
+    try:
+        cursor.execute("SELECT * FROM services WHERE service_id = %s", (service_id,))
+        current = cursor.fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Service not found")
+
+        service_name = payload.get("service_name", current["service_name"])
+        category = payload.get("category", current["category"])
+        price = float(payload.get("price", current["price"]))
+        duration = payload.get("duration", current["duration"])
+        description = payload.get("description", current["description"])
+        status_val = payload.get("status", current["status"])
+
+        cursor.execute(
+            """
+            UPDATE services
+            SET service_name=%s, category=%s, price=%s, duration=%s, description=%s, status=%s
+            WHERE service_id=%s
+            """,
+            (service_name, category, price, duration, description, status_val, service_id),
+        )
+        connection.commit()
+    finally:
         cursor.close()
         connection.close()
-        raise HTTPException(status_code=404, detail="Service not found")
-
-    service_name = payload.get("service_name", current["service_name"])
-    category = payload.get("category", current["category"])
-    price = float(payload.get("price", current["price"]))
-    duration = payload.get("duration", current["duration"])
-    description = payload.get("description", current["description"])
-    status_val = payload.get("status", current["status"])
-
-    cursor.execute(
-        """
-        UPDATE services
-        SET service_name=%s, category=%s, price=%s, duration=%s, description=%s, status=%s
-        WHERE service_id=%s
-        """,
-        (service_name, category, price, duration, description, status_val, service_id),
-    )
-    connection.commit()
-    cursor.close()
-    connection.close()
 
     service_data = {
         "service_id": service_id,
@@ -1163,16 +1347,19 @@ async def update_service(
 
 
 @app.delete("/services/{service_id}")
+@app.delete("/api/services/{service_id}")
 async def delete_service(
     service_id: str,
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("DELETE FROM services WHERE service_id = %s", (service_id,))
-    connection.commit()
-    cursor.close()
-    connection.close()
+    try:
+        cursor.execute("DELETE FROM services WHERE service_id = %s", (service_id,))
+        connection.commit()
+    finally:
+        cursor.close()
+        connection.close()
 
     try:
         await ws_manager.broadcast("SERVICE_DELETED", {"service_id": service_id})

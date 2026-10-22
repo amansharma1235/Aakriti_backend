@@ -109,6 +109,19 @@ async def create_new_appointment(
             )
             db.add(new_patient)
             db.commit()
+    else:
+        existing_p = db.query(Patient).filter(Patient.patient_id == patient_id).first()
+        if not existing_p:
+            new_patient = Patient(
+                patient_id=patient_id,
+                full_name=patient_name,
+                mobile=mobile or "",
+                age=age or 25,
+                gender=gender or "Male",
+                status="Active"
+            )
+            db.add(new_patient)
+            db.commit()
 
     # Create Appointment
     new_apt = Appointment(
