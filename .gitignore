@@ -1,0 +1,91 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+*.git_bak
+**/.git_bak/
+
+# IntelliJ & VS Code
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+
+# Flutter / Dart / Pub
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+**/.dart_tool/
+.flutter-plugins-dependencies
+**/.flutter-plugins-dependencies
+.pub-cache/
+**/.pub-cache/
+.pub/
+**/.pub/
+build/
+**/build/
+coverage/
+**/coverage/
+.widget_preview/
+**/.widget_preview/
+
+# Android Studio / Gradle
+.gradle/
+**/.gradle/
+local.properties
+**/local.properties
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+*.apk
+**/*.apk
+*.aab
+**/*.aab
+apks/
+
+# iOS / macOS Flutter
+**/Pods/
+**/.symlinks/
+**/Flutter/Flutter.framework
+**/Flutter/Flutter.podspec
+**/Flutter/ephemeral/
+**/ephemeral/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+**/.venv/
+env/
+**/env/
+venv/
+**/venv/
+
+# Secrets & Environment files
+.env
+**/.env
+*.env
+**/*.env
+!*.env.example
+!**/*.env.example
+firebase_service_account*.json
+**/*service_account*.json
+*.keystore
+**/*.keystore
+*.jks
+**/*.jks
+
+# Firebase CLI cache
+.firebase/
