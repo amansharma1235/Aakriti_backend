@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: aakriti-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@aakriti.com
+      - key: ADMIN_PASSWORD
+        value: admin123
+      - key: MYSQL_HOST
+        value: localhost
+      - key: MYSQL_USER
+        value: root
+      - key: MYSQL_DATABASE
+        value: aakriti_ultrasound
